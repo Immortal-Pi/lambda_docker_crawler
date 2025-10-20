@@ -25,7 +25,7 @@
     * [2018 Graduate Catalog](https://catalog.utdallas.edu/2018/graduate/home/)
     * [2017 Graduate Catalog](https://catalog.utdallas.edu/2017/graduate/home/)
     * [2016 Graduate Catalog](https://catalog.utdallas.edu/2016/graduate/home/)
-  * [UT DALLAS LOGIN](https://wat.utdallas.edu/login)
+  * [](https://catalog.utdallas.edu/2025/graduate/courses/ecsc)
 
 
 UT Dallas 2025 Graduate Catalog

@@ -1,12 +1,52 @@
 # base image 
-FROM public.ecr.aws/lambda/python:3.11
+# FROM public.ecr.aws/lambda/python:3.11-al2023
+FROM public.ecr.aws/lambda/python:3.12
+# ENV PIP_PREFER_BINARY=1
+# RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+# # copy requiremen.txt
+# COPY requirements.txt ${LAMBDA_TASK_ROOT}
 
-RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
-# copy requiremen.txt
+# RUN python -m pip install --no-cache-dir -r requirements.txt
+
+# RUN python -m playwright install chromium
+
+# COPY src/ ${LAMBDA_TASK_ROOT}
+
+# CMD ["main.handler"]
+RUN dnf -y update && dnf -y install \
+    at-spi2-atk \
+    atk \
+    cups-libs \
+    dbus-libs \
+    glib2 \
+    libX11 \
+    libXcomposite \
+    libXcursor \
+    libXdamage \
+    libXext \
+    libXfixes \
+    libXi \
+    libXrandr \
+    libXScrnSaver \
+    libdrm \
+    libgbm \
+    libxkbcommon \
+    mesa-libEGL \
+    mesa-libgbm \
+    nss \
+    pango \
+    gtk3 \
+    alsa-lib \
+ && dnf clean all
+
 COPY requirements.txt ${LAMBDA_TASK_ROOT}
 
-RUN python -m pip install --no-cache-dir --only-binary=:all: -r requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel
 
-COPY src/* ${LAMBDA_TASK_ROOT}
+RUN python -m pip install --no-cache-dir -r requirements.txt
+
+RUN python -m playwright install chromium
+
+COPY src/ ${LAMBDA_TASK_ROOT}
 
 CMD ["main.handler"]

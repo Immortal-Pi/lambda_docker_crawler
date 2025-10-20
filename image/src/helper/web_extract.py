@@ -84,7 +84,7 @@ async def crawl_all(seed: str):
     pieces = []
     count = 0
 
-    async with AsyncWebCrawler(verbose=True) as crawler:
+    async with AsyncWebCrawler(verbose=True, browserless=True) as crawler:
         # crawl the hub page
         hub = await crawler.arun(
             url=seed,

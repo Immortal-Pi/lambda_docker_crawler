@@ -1,2 +1,7 @@
-S3_BUCKET: utd-catalog 
+S3_BUCKET: utd-catalog-tokenaughts
 SEED_URL: https://catalog.utdallas.edu/2025/graduate/courses
+USE_BROWSER: "1"
+INCLUDE_FRAGMENT: /2025/graduate/courses/
+RATE_SLEEP: 0.3     # polite delay between requests
+MIN_LEN: 50              # skip very short pages
+MAX_PAGES: 0
