@@ -11,13 +11,17 @@
 # trafilatura==1.8.1
 # playwright==1.46.0
 # Crawl4AI plus Playwright
-crawl4ai
-# playwright==1.46.0
-playwright
-# AWS + DB (if you need them later)
-boto3>=1.34
-psycopg2-binary>=2.9
+# crawl4ai
+# # playwright==1.46.0
+# playwright
+# # AWS + DB (if you need them later)
+# boto3>=1.34
+# psycopg2-binary>=2.9
 
-# Optional: avoid wheels-from-source headaches
-numpy==1.26.4
-tiktoken==0.7.0
+# # Optional: avoid wheels-from-source headaches
+# numpy==1.26.4
+# tiktoken==0.7.0
+httpx[http2]==0.27.2
+selectolax==0.3.25
+html2text==2024.2.26
+boto3==1.35.36

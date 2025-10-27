@@ -1,160 +1,158 @@
-import os 
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/ms-playwright"
-os.environ["HOME"] = "/tmp"
-os.environ["XDG_CACHE_HOME"] = "/tmp/.cache"
-os.environ["XDG_DATA_HOME"]  = "/tmp/.local/share"
-os.environ["XDG_STATE_HOME"] = "/tmp/.local/state"
+# minimal deps: httpx, selectolax, html2text, boto3
+# pip install httpx selectolax html2text boto3
 
-# If crawl4ai honors a custom cache/db dir, set them (harmless if unused)
-os.environ["CRAWL4AI_CACHE_DIR"] = "/tmp/crawl4ai/cache"
-os.environ["CRAWL4AI_DB_PATH"]   = "/tmp/crawl4ai/db"
+import asyncio, re, hashlib, os, pathlib
 from datetime import datetime, timezone
-import asyncio, os, hashlib, pathlib
+from urllib.parse import urljoin, urlparse, urldefrag
+import httpx
+from selectolax.parser import HTMLParser
+import html2text
 import boto3
-from urllib.parse import urlparse
-from crawl4ai import AsyncWebCrawler
-from helper.config_loader import load_config
-config=load_config()
+
+# -------- config (reuse your keys/values) --------
+S3_BUCKET         = os.environ.get("S3_BUCKET", "utd-catalog-tokenaughts")
+SEED_URL          = os.environ.get("SEED_URL", "https://catalog.utdallas.edu/2025/graduate/courses")
+INCLUDE_FRAGMENT  = os.environ.get("INCLUDE_FRAGMENT", "/courses/")    # keep only links that contain this
+RATE_SLEEP        = float(os.environ.get("RATE_SLEEP", "0.25"))
+MIN_LEN           = int(os.environ.get("MIN_LEN", "300"))
+MAX_PAGES         = int(os.environ.get("MAX_PAGES", "0"))              # 0 = no cap
+
+TIMEOUT_SEC       = 20
+CONCURRENCY       = 8                                                  # small, polite
+HEADERS = {
+    "user-agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124 Safari/537.36"),
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 _s3 = boto3.client("s3")
+_md = html2text.HTML2Text()
+_md.ignore_links = False
+_md.body_width = 0
 
+def _same_site(u, seed):
+    a, b = urlparse(u), urlparse(seed)
+    return (a.scheme, a.netloc) == (b.scheme, b.netloc)
 
-# If you use Playwright at runtime, keep its caches in /tmp too
-# os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/opt/ms-playwright"
-
-# Pre-create dirs to avoid races
-for p in [
-    "/tmp/.cache", "/tmp/.local/share", "/tmp/.local/state",
-    "/tmp/crawl4ai/cache", "/tmp/crawl4ai/db",
-]:
-    pathlib.Path(p).mkdir(parents=True, exist_ok=True)
-LAUNCH_ARGS = {
-    "headless": True,
-    "args": [
-        "--headless=new",
-         "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-webgl",
-        "--disable-accelerated-2d-canvas",
-        "--use-gl=swiftshader",         # <- force software GL, avoids GPU proc
-        "--use-angle=swiftshader",      # <- belt & suspenders
-        "--no-zygote",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-    ],
-}
-# -------- config helpers --------
-def _env(k, default=None):
-    v = os.getenv(k)
-    return v if v is not None else default
-
-S3_BUCKET = config['S3_BUCKET']
-SEED_URL  = config['SEED_URL'] 
-INCLUDE_FRAGMENT = config['INCLUDE_FRAGMENT']
-RATE_SLEEP = config['RATE_SLEEP']     # polite delay between requests
-MIN_LEN = config['MIN_LEN']              # skip very short pages
-MAX_PAGES = config['MAX_PAGES']           # 0 = no cap; use for safety if you want
+def _normalize(seed, href):
+    if not href:
+        return None
+    href, _ = urldefrag(href)              # drop #fragments
+    url = urljoin(seed, href)
+    # only http/https
+    if not url.startswith(("http://", "https://")):
+        return None
+    return url
 
 def _make_s3_key(prefix="catalog"):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     year = datetime.now(timezone.utc).strftime("%Y")
     return f"{prefix}/{year}/all_{now}.md"
 
-def _same_site(url, seed):
-    a, b = urlparse(url), urlparse(seed)
-    return (a.scheme, a.netloc) == (b.scheme, b.netloc)
-
 def _header(url: str, title: str | None) -> str:
     t = (title or "").strip()
     h = f"\n\n### SOURCE: {url}\n"
     return h + (f"#### {t}\n\n" if t else "\n")
 
-# -------- crawler --------
-async def _fetch(crawler: AsyncWebCrawler, url: str):
-    r = await crawler.arun(
-        url=url,
-        exclude_external_links=True,
-        process_iframes=False,
-        remove_overlay_elements=True,
-        bypass_cache=False,
-    )
-    if r and r.success and r.markdown and len(r.markdown) >= MIN_LEN:
-        return r
-    return None
+async def fetch_html(client: httpx.AsyncClient, url: str) -> str | None:
+    try:
+        r = await client.get(url, headers=HEADERS, timeout=TIMEOUT_SEC, follow_redirects=True)
+        if r.status_code >= 400 or "text/html" not in r.headers.get("content-type", ""):
+            return None
+        return r.text
+    except Exception:
+        return None
 
+def extract_title_and_links(seed: str, html: str) -> tuple[str | None, list[str]]:
+    doc = HTMLParser(html)
+    title = None
+    # try standard <title>
+    tnode = doc.css_first("title")
+    if tnode and tnode.text():
+        title = tnode.text().strip()
+    # collect all internal links
+    links = []
+    for a in doc.css("a[href]"):
+        href = a.attributes.get("href")
+        url = _normalize(seed, href)
+        if not url:
+            continue
+        if _same_site(url, seed) and (INCLUDE_FRAGMENT in url if INCLUDE_FRAGMENT else True):
+            links.append(url)
+    return title, links
 
-async def _crawl_all(seed: str) -> str:
-    headers = {
-        "user-agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
+def html_to_markdown(html: str) -> str:
+    # Try to focus on main content area if present
+    doc = HTMLParser(html)
+    main = doc.css_first("main") or doc.css_first("#content") or doc.css_first(".content") or doc.body
+    if not main:
+        return ""
+    # Convert only that subtree to HTML string, then to Markdown
+    subtree_html = main.html if hasattr(main, "html") else str(main)
+    md = _md.handle(subtree_html or "")
+    # light cleanup
+    md = re.sub(r"\n{3,}", "\n\n", md).strip()
+    return md
+
+async def crawl_catalog(seed: str) -> str:
     blocks = []
-    count = 0
+    seen  = set()
+    queue = []
 
-    # ⬇️ CHANGED: browserless=False (local), pass browser_args, limit concurrency, longer timeout
-    async with AsyncWebCrawler(
-        browser_type="chromium",
-    launch_options=LAUNCH_ARGS,   # <-- IMPORTANT
-    max_concurrency=1,
-    timeout=90,
-    navigation_timeout=60000,        # if your version supports it
-    page_timeout=60000,              # if supported
-    headers=headers,
-    verbose=False,
-    ) as crawler:
+    limits = httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=CONCURRENCY)
+    async with httpx.AsyncClient(http2=True, timeout=TIMEOUT_SEC, limits=limits) as client:
+        # Fetch hub
+        html = await fetch_html(client, seed)
+        if not html:
+            return ""
+        title, links = extract_title_and_links(seed, html)
+        md = html_to_markdown(html)
+        if md and len(md) >= MIN_LEN:
+            blocks += [_header(seed, title), md, "\n---\n"]
+        # seed queue
+        for u in links:
+            if u not in seen:
+                seen.add(u)
+                queue.append(u)
 
-        # 1) hub
-        hub = await _fetch(crawler, seed)
-        if not hub:
-            return ""  # bail: nothing to write
-        blocks.append(_header(seed, hub.metadata.get("title")))
-        blocks.append(hub.markdown)
-        blocks.append("\n---\n")
-        count += 1
+        # BFS over subject/course pages
+        count = 1
+        sem = asyncio.Semaphore(CONCURRENCY)
 
-        # 2) discover internal links on hub
-        links = []
-        for link in hub.links.get("internal", []):
-            href = link.get("href")
-            if not href:
-                continue
-            if INCLUDE_FRAGMENT in href and _same_site(href, seed):
-                links.append(href)
+        async def worker(url: str):
+            nonlocal count
+            async with sem:
+                h = await fetch_html(client, url)
+                await asyncio.sleep(RATE_SLEEP)
+            if not h:
+                return None
+            t, _ = extract_title_and_links(seed, h)
+            m = html_to_markdown(h)
+            if m and len(m) >= MIN_LEN:
+                blocks.extend([_header(url, t), m, "\n---\n"])
+                count += 1
+            return None
 
-        # 3) crawl each subject/course page (dedup; optional cap)
-        seen = set()
-        for url in links:
-            if url in seen:
-                continue
-            seen.add(url)
+        tasks = []
+        for url in queue:
             if MAX_PAGES and count >= MAX_PAGES:
                 break
-
-            r = await _fetch(crawler, url)
-            if r:
-                blocks.append(_header(url, r.metadata.get("title")))
-                blocks.append(r.markdown)
-                blocks.append("\n---\n")
-                count += 1
-
-            await asyncio.sleep(RATE_SLEEP)  # polite delay
+            tasks.append(asyncio.create_task(worker(url)))
+        if tasks:
+            await asyncio.gather(*tasks)
 
     return "".join(blocks)
 
-# -------- lambda handler --------
+# ---------- Lambda handler ----------
 def handler(event, context):
-    text = asyncio.run(_crawl_all(SEED_URL))
+    # Ensure /tmp exists (Lambda)
+    pathlib.Path("/tmp").mkdir(exist_ok=True)
+    text = asyncio.run(crawl_catalog(SEED_URL))
     if not text or len(text.strip()) < MIN_LEN:
-        return {"wrote": False, "reason": "crawl returned empty/short", "seed": SEED_URL}
+        return {"wrote": False, "reason": "empty/short", "seed": SEED_URL}
 
     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     s3_key = _make_s3_key()
-
     _s3.put_object(
         Bucket=S3_BUCKET,
         Key=s3_key,
@@ -163,10 +161,3 @@ def handler(event, context):
         ContentType="text/markdown; charset=utf-8",
     )
     return {"bucket": S3_BUCKET, "key": s3_key, "sha256": sha, "bytes": len(text)}
-
-
-# def handler(event, context):
-#     arr=np.random.randint(0,10,(3,3))
-#     return {"satusCode":200, 
-#             "body":{"array":arr.tolist()}}
-
