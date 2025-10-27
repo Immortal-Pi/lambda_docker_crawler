@@ -1,79 +1,15 @@
-# lambda function handler 
-# from datetime import datetime, timezone
-# import hashlib, boto3, asyncio
-# from crawl4ai import AsyncWebCrawler
-# import os 
-# from helper.config_loader import load_config
-# # lambda function handler
-# from datetime import datetime, timezone
-# import hashlib, boto3, asyncio, os
-# from crawl4ai import AsyncWebCrawler
-# from helper.config_loader import load_config
+import os 
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/ms-playwright"
+os.environ["HOME"] = "/tmp"
+os.environ["XDG_CACHE_HOME"] = "/tmp/.cache"
+os.environ["XDG_DATA_HOME"]  = "/tmp/.local/share"
+os.environ["XDG_STATE_HOME"] = "/tmp/.local/state"
 
-# _s3 = boto3.client("s3")
-# _config = None  # lazy-load once per container
-
-# def _get_config():
-#     global _config
-#     if _config is None:
-#         # allow override via env in case file is missing
-#         _config = load_config()
-#         _config.setdefault("S3_BUCKET", os.getenv("S3_BUCKET", "utd-catalog-tokenaughts"))
-#         _config.setdefault("SEED_URL", os.getenv("SEED_URL", "https://catalog.utdallas.edu/2025/graduate/courses"))
-#     return _config
-
-# def _make_s3_key(prefix="catalog"):
-#     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-#     year = datetime.now(timezone.utc).strftime("%Y")
-#     return f"{prefix}/{year}/all_{now}.md"  # markdown extension
-
-# async def _crawl(seed: str) -> str:
-#     # Browserless, with some resilience
-#     headers = {
-#         "user-agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-#                        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
-#         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-#     }
-#     async with AsyncWebCrawler(verbose=False, browserless=True, headers=headers, timeout=20) as crawler:
-#         r = await crawler.arun(
-#             url=seed,
-#             exclude_external_links=True,
-#             process_iframes=False,
-#             remove_overlay_elements=True,
-#         )
-#         return r.markdown if (r and r.success and r.markdown) else ""
-
-# def handler(event, context):
-#     cfg = _get_config()
-#     s3_bucket = cfg["S3_BUCKET"]
-#     seed_url  = cfg["SEED_URL"]
-
-#     text = asyncio.run(_crawl(seed_url))
-#     if not text or len(text.strip()) < 50:
-#         # Return a helpful reason for observability
-#         return {"wrote": False, "reason": "crawl returned empty/short", "seed": seed_url}
-
-#     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-#     s3_key = _make_s3_key()
-
-#     _s3.put_object(
-#         Bucket=s3_bucket,
-#         Key=s3_key,
-#         Body=text.encode("utf-8"),
-#         Metadata={"sha256": sha, "seed": seed_url},
-#         ContentType="text/markdown; charset=utf-8",
-#     )
-#     return {"bucket": s3_bucket, "key": s3_key, "sha256": sha, "bytes": len(text)}
-
-# def handler(event, context):
-#     arr=np.random.randint(0,10,(3,3))
-#     return {"satusCode":200, 
-#             "body":{"array":arr.tolist()}}
-
-# lambda function handler 
-# Lambda A — extract ALL course pages → single S3 file (browserless)
+# If crawl4ai honors a custom cache/db dir, set them (harmless if unused)
+os.environ["CRAWL4AI_CACHE_DIR"] = "/tmp/crawl4ai/cache"
+os.environ["CRAWL4AI_DB_PATH"]   = "/tmp/crawl4ai/db"
 from datetime import datetime, timezone
-import asyncio, os, hashlib
+import asyncio, os, hashlib, pathlib
 import boto3
 from urllib.parse import urlparse
 from crawl4ai import AsyncWebCrawler
@@ -82,6 +18,35 @@ config=load_config()
 
 _s3 = boto3.client("s3")
 
+
+# If you use Playwright at runtime, keep its caches in /tmp too
+# os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/opt/ms-playwright"
+
+# Pre-create dirs to avoid races
+for p in [
+    "/tmp/.cache", "/tmp/.local/share", "/tmp/.local/state",
+    "/tmp/crawl4ai/cache", "/tmp/crawl4ai/db",
+]:
+    pathlib.Path(p).mkdir(parents=True, exist_ok=True)
+LAUNCH_ARGS = {
+    "headless": True,
+    "args": [
+        "--headless=new",
+         "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-webgl",
+        "--disable-accelerated-2d-canvas",
+        "--use-gl=swiftshader",         # <- force software GL, avoids GPU proc
+        "--use-angle=swiftshader",      # <- belt & suspenders
+        "--no-zygote",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+    ],
+}
 # -------- config helpers --------
 def _env(k, default=None):
     v = os.getenv(k)
@@ -121,6 +86,7 @@ async def _fetch(crawler: AsyncWebCrawler, url: str):
         return r
     return None
 
+
 async def _crawl_all(seed: str) -> str:
     headers = {
         "user-agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -130,7 +96,18 @@ async def _crawl_all(seed: str) -> str:
     blocks = []
     count = 0
 
-    async with AsyncWebCrawler(verbose=False, browserless=True, headers=headers, timeout=25) as crawler:
+    # ⬇️ CHANGED: browserless=False (local), pass browser_args, limit concurrency, longer timeout
+    async with AsyncWebCrawler(
+        browser_type="chromium",
+    launch_options=LAUNCH_ARGS,   # <-- IMPORTANT
+    max_concurrency=1,
+    timeout=90,
+    navigation_timeout=60000,        # if your version supports it
+    page_timeout=60000,              # if supported
+    headers=headers,
+    verbose=False,
+    ) as crawler:
+
         # 1) hub
         hub = await _fetch(crawler, seed)
         if not hub:
@@ -165,10 +142,8 @@ async def _crawl_all(seed: str) -> str:
                 blocks.append("\n---\n")
                 count += 1
 
-            # polite delay (non-blocking)
-            await asyncio.sleep(RATE_SLEEP)
+            await asyncio.sleep(RATE_SLEEP)  # polite delay
 
-    # one big markdown
     return "".join(blocks)
 
 # -------- lambda handler --------

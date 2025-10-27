@@ -11,9 +11,9 @@
 # trafilatura==1.8.1
 # playwright==1.46.0
 # Crawl4AI plus Playwright
-crawl4ai==0.7.4
+crawl4ai
 # playwright==1.46.0
-
+playwright
 # AWS + DB (if you need them later)
 boto3>=1.34
 psycopg2-binary>=2.9

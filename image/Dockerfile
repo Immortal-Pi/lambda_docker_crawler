@@ -39,13 +39,21 @@ RUN dnf -y update && dnf -y install \
     alsa-lib \
  && dnf clean all
 
+ENV HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache \
+    XDG_DATA_HOME=/tmp/.local/share \
+    XDG_STATE_HOME=/tmp/.local/state \
+    CRAWL4AI_CACHE_DIR=/tmp/crawl4ai/cache \
+    CRAWL4AI_DB_PATH=/tmp/crawl4ai/db \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 COPY requirements.txt ${LAMBDA_TASK_ROOT}
 
 RUN python -m pip install --upgrade pip setuptools wheel
 
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-RUN python -m playwright install chromium
+RUN playwright install chromium
 
 COPY src/ ${LAMBDA_TASK_ROOT}
 
