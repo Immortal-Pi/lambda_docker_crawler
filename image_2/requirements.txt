@@ -1,0 +1,6 @@
+boto3
+psycopg[binary]   # for Aurora/RDS Postgres
+tiktoken          # optional, if you want token-aware chunking
+pinecone 
+openai
+dotenv

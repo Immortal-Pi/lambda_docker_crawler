@@ -8,7 +8,7 @@ import httpx
 from selectolax.parser import HTMLParser
 import html2text
 import boto3
-
+from helper.clean_data import clean_text
 # -------- config (reuse your keys/values) --------
 S3_BUCKET         = os.environ.get("S3_BUCKET", "utd-catalog-tokenaughts")
 SEED_URL          = os.environ.get("SEED_URL", "https://catalog.utdallas.edu/2025/graduate/courses")
@@ -150,13 +150,13 @@ def handler(event, context):
     text = asyncio.run(crawl_catalog(SEED_URL))
     if not text or len(text.strip()) < MIN_LEN:
         return {"wrote": False, "reason": "empty/short", "seed": SEED_URL}
-
+    raw_text=clean_text(text)
     sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     s3_key = _make_s3_key()
     _s3.put_object(
         Bucket=S3_BUCKET,
         Key=s3_key,
-        Body=text.encode("utf-8"),
+        Body=raw_text.encode("utf-8"),
         Metadata={"sha256": sha, "seed": SEED_URL},
         ContentType="text/markdown; charset=utf-8",
     )
